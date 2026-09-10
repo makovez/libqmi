@@ -33,6 +33,7 @@
 #include <sys/types.h>
 
 #include "qmi-endpoint-qmux.h"
+#include <poll.h>
 #include "qmi-ctl.h"
 #include "qmi-errors.h"
 #include "qmi-error-types.h"
@@ -77,6 +78,20 @@ input_ready_cb (GInputStream *istream,
                                                   NULL,
                                                   &error);
     if (r < 0) {
+        if (g_error_matches (error, G_IO_ERROR, G_IO_ERROR_WOULD_BLOCK)) {
+            if (G_IS_UNIX_INPUT_STREAM (istream)) {
+                gint fd = g_unix_input_stream_get_fd (G_UNIX_INPUT_STREAM (istream));
+                struct pollfd pfd = { .fd = fd, .events = POLLIN, .revents = 0 };
+                if (poll (&pfd, 1, 0) > 0 && (pfd.revents & (POLLERR | POLLHUP | POLLNVAL))) {
+                    g_warning ("Cannot read from istream: device hung up or errored (POLLERR on fd %d)", fd);
+                    g_error_free (error);
+                    g_signal_emit_by_name (QMI_ENDPOINT (self), QMI_ENDPOINT_SIGNAL_HANGUP);
+                    return G_SOURCE_REMOVE;
+                }
+            }
+            g_error_free (error);
+            return G_SOURCE_CONTINUE;
+        }
         g_warning ("Error reading from istream: %s", error ? error->message : "unknown");
         if (error)
             g_error_free (error);

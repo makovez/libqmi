@@ -20,6 +20,40 @@
 
 #include "config.h"
 
+#define _GNU_SOURCE
+#include <dlfcn.h>
+#include <errno.h>
+#include <poll.h>
+#include <syslog.h>
+#include <unistd.h>
+
+static ssize_t (*real_read)(int fd, void *buf, size_t count) = NULL;
+
+/*
+ * Intercept libc read() to prevent GLib's GUnixInputStream from entering
+ * an infinite 100% CPU spin loop on character devices with POLLERR / EAGAIN.
+ */
+ssize_t read (int fd, void *buf, size_t count)
+{
+    if (!real_read)
+        real_read = dlsym (RTLD_NEXT, "read");
+
+    ssize_t res = real_read (fd, buf, count);
+
+    if (res < 0 && (errno == EAGAIN || errno == EWOULDBLOCK)) {
+        struct pollfd pfd = { .fd = fd, .events = POLLIN, .revents = 0 };
+        if (poll (&pfd, 1, 0) > 0 && (pfd.revents & (POLLERR | POLLHUP | POLLNVAL))) {
+            syslog (LOG_WARNING,
+                    "qmi-proxy: fd %d has POLLERR/POLLHUP with EAGAIN; converting to EIO to break spin loop",
+                    fd);
+            errno = EIO;
+        }
+    }
+
+    return res;
+}
+
+
 #include <stdio.h>
 #include <stdlib.h>
 #include <locale.h>

@@ -1,0 +1,83 @@
+name: Build Patched qmi-proxy and Release Package
+
+on:
+  push:
+    branches: [ main, master, 'pxm2-*' ]
+    tags: [ 'v*', 'pxm2-*' ]
+  pull_request:
+    branches: [ main, master ]
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+
+    steps:
+    - name: Checkout repository
+      uses: actions/checkout@v4
+
+    - name: Install build dependencies
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y \
+          gcc meson ninja-build pkg-config \
+          libglib2.0-dev libgudev-1.0-dev \
+          python3-pip dpkg-dev file
+
+    - name: Configure with Meson
+      run: |
+        meson setup build \
+          --prefix=/usr \
+          --libexecdir=/usr/libexec \
+          -Dmbim_qmux=false \
+          -Dqrtr=false \
+          -Dgtk_doc=false \
+          -Dintrospection=false \
+          -Dbash_completion=false \
+          -Dudev=true
+
+    - name: Compile qmi-proxy
+      run: |
+        ninja -C build
+
+    - name: Package Debian .deb
+      run: |
+        mkdir -p dist/usr/libexec dist/DEBIAN
+        cp build/src/qmi-proxy/qmi-proxy dist/usr/libexec/qmi-proxy
+        chmod 755 dist/usr/libexec/qmi-proxy
+        strip dist/usr/libexec/qmi-proxy
+
+        cat << 'CTRL_EOF' > dist/DEBIAN/control
+Package: qmi-proxy-patched
+Version: 1.38.0-pxm2
+Section: net
+Priority: optional
+Architecture: amd64
+Maintainer: Makovez <noreply@github.com>
+Depends: libc6 (>= 2.34), libglib2.0-0t64 (>= 2.30.0)
+Provides: libqmi-proxy
+Conflicts: libqmi-proxy
+Replaces: libqmi-proxy
+Description: Patched qmi-proxy preventing 100% CPU spin loops during USB transfer errors
+ Patched version of qmi-proxy from makovez/libqmi with built-in poll/read safety
+ preventing GLib GUnixInputStream busy loops when modems experience USB -71 protocol errors.
+CTRL_EOF
+
+        dpkg-deb --root-owner-group --build dist qmi-proxy-patched_1.38.0-pxm2_amd64.deb
+        ls -la *.deb
+
+    - name: Upload Debian Package Artifact
+      uses: actions/upload-artifact@v4
+      with:
+        name: qmi-proxy-patched-deb
+        path: "*.deb"
+
+    - name: Create Release
+      if: startsWith(github.ref, 'refs/tags/')
+      uses: softprops/action-gh-release@v2
+      with:
+        files: "*.deb"
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

@@ -7,7 +7,7 @@ executable(
   name,
   sources: name + '.c',
   include_directories: top_inc,
-  dependencies: libqmi_glib_dep,
+  dependencies: [libqmi_glib_dep, cc.find_library('dl', required: false)],
   install: true,
   install_dir: qmi_libexecdir,
 )
