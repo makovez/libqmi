@@ -1155,7 +1155,6 @@ incoming_cb (GSocketService    *service,
     client->proxy = self;
     client->connection = g_object_ref (connection);
     client->cancellable = g_cancellable_new ();
-    g_socket_set_timeout (g_socket_connection_get_socket (connection), 5);
     client->connection_readable_source = g_socket_create_source (g_socket_connection_get_socket (client->connection),
                                                                  G_IO_IN | G_IO_PRI | G_IO_ERR | G_IO_HUP,
                                                                  NULL);
