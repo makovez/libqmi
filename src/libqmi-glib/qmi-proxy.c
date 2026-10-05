@@ -278,16 +278,16 @@ release_not_released_clients (QmiProxy  *self,
         if (info->service > G_MAXUINT8) {
             message = qmi_message_new (QMI_SERVICE_CTL, 0, 0, QMI_MESSAGE_CTL_INTERNAL_RELEASE_CID_QRTR);
             init_offset = qmi_message_tlv_write_init (message, QMI_MESSAGE_INPUT_TLV_RELEASE_INFO, NULL);
-            qmi_message_tlv_write_guint16 (message, (guint16)info->service, QMI_ENDIAN_LITTLE);
-            qmi_message_tlv_write_guint8 (message, info->cid);
+            qmi_message_tlv_write_guint16 (message, QMI_ENDIAN_LITTLE, (guint16)info->service, NULL);
+            qmi_message_tlv_write_guint8 (message, info->cid, NULL);
             qmi_message_tlv_write_complete (message, init_offset, NULL);
         } else
 #endif
         {
             message = qmi_message_new (QMI_SERVICE_CTL, 0, 0, QMI_MESSAGE_CTL_RELEASE_CID);
             init_offset = qmi_message_tlv_write_init (message, QMI_MESSAGE_INPUT_TLV_RELEASE_INFO, NULL);
-            qmi_message_tlv_write_guint8 (message, (guint8)info->service);
-            qmi_message_tlv_write_guint8 (message, info->cid);
+            qmi_message_tlv_write_guint8 (message, (guint8)info->service, NULL);
+            qmi_message_tlv_write_guint8 (message, info->cid, NULL);
             qmi_message_tlv_write_complete (message, init_offset, NULL);
         }
 
