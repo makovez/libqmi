@@ -64,7 +64,7 @@ Maintainer: Makovez <noreply@github.com>
 Depends: libc6 (>= 2.34), libglib2.0-0t64 (>= 2.30.0)
 Provides: libqmi-proxy
 Conflicts: libqmi-proxy
-Replaces: libqmi-proxy
+Replaces: libqmi-proxy, libqmi-glib5
 Description: Patched qmi-proxy preventing firmware CID leaks, zombie FDs, and socket write hangs
  Patched version of qmi-proxy and libqmi-glib from makovez/libqmi with automatic CID release on disconnect,
  device-removed signal handlers for zombie fd eviction, and socket write timeouts.
