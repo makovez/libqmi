@@ -115,6 +115,7 @@ typedef struct {
     GSocketConnection *connection;
     GSource           *connection_readable_source;
     GByteArray        *buffer;
+    GCancellable      *cancellable;
 
     /* QMI device associated to connection */
     QmiDevice  *device;
@@ -134,6 +135,10 @@ static void     untrack_client         (QmiProxy *self, Client *client);
 static void
 client_disconnect (Client *client)
 {
+    if (client->cancellable) {
+        g_cancellable_cancel (client->cancellable);
+    }
+
     if (client->connection_readable_source) {
         g_source_destroy (client->connection_readable_source);
         g_source_unref (client->connection_readable_source);
@@ -163,6 +168,7 @@ client_unref (Client *client)
             g_object_unref (client->device);
         }
 
+        g_clear_object (&client->cancellable);
         g_clear_pointer (&client->buffer,                      g_byte_array_unref);
         g_clear_pointer (&client->internal_proxy_open_request, g_byte_array_unref);
         g_clear_pointer (&client->qmi_client_info_array,       g_array_unref);
@@ -198,7 +204,7 @@ client_send_message (Client      *client,
                                     message->data,
                                     message->len,
                                     NULL, /* bytes_written */
-                                    NULL, /* cancellable */
+                                    client->cancellable,
                                     error)) {
         g_prefix_error (error, "Cannot send message to client: ");
         return FALSE;
@@ -210,6 +216,11 @@ client_send_message (Client      *client,
 /*****************************************************************************/
 /* Track/untrack clients */
 
+static void device_track_ctl_request   (QmiDevice *device);
+static void device_untrack_ctl_request (QmiDevice *device);
+static void device_close_if_unused     (QmiProxy  *self,
+                                        QmiDevice *device);
+
 static void
 track_client (QmiProxy *self,
               Client   *client)
@@ -219,36 +230,79 @@ track_client (QmiProxy *self,
 }
 
 static void
-disown_not_released_clients (QmiProxy *self,
-                             Client   *client)
+release_disowned_client_ready (QmiDevice    *device,
+                               GAsyncResult *res,
+                               QmiProxy     *self)
+{
+    g_autoptr(QmiMessage) response = NULL;
+    g_autoptr(GError)     error = NULL;
+
+    response = qmi_device_command_full_finish (device, res, &error);
+    if (!response)
+        g_debug ("releasing unreleased CID failed: %s", error ? error->message : "unknown");
+    else
+        g_debug ("releasing unreleased CID succeeded");
+
+    device_untrack_ctl_request (device);
+    device_close_if_unused (self, device);
+    g_object_unref (self);
+}
+
+static void
+release_not_released_clients (QmiProxy  *self,
+                              Client    *client,
+                              QmiDevice *device)
 {
     guint i;
 
-    if (!client->qmi_client_info_array || !client->qmi_client_info_array->len)
+    if (!client->qmi_client_info_array || !client->qmi_client_info_array->len || !device)
         return;
+
+    if (!qmi_device_is_open (device)) {
+        g_array_set_size (client->qmi_client_info_array, 0);
+        return;
+    }
 
     for (i = 0; i < client->qmi_client_info_array->len; i++) {
         QmiClientInfo *info;
+        g_autoptr(QmiMessage) message = NULL;
+        gsize init_offset;
 
         info = &g_array_index (client->qmi_client_info_array, QmiClientInfo, i);
-        g_debug ("QMI client disowned [%s,%s,%u]",
-                 qmi_device_get_path_display (client->device),
+        g_debug ("QMI client auto-releasing on disconnect [%s,%s,%u]",
+                 qmi_device_get_path_display (device),
                  qmi_service_get_string (info->service),
                  info->cid);
+
+#if QMI_QRTR_SUPPORTED
+        if (info->service > G_MAXUINT8) {
+            message = qmi_message_new (QMI_SERVICE_CTL, 0, 0, QMI_MESSAGE_CTL_INTERNAL_RELEASE_CID_QRTR);
+            init_offset = qmi_message_tlv_write_init (message, QMI_MESSAGE_INPUT_TLV_RELEASE_INFO, NULL);
+            qmi_message_tlv_write_guint16 (message, (guint16)info->service, QMI_ENDIAN_LITTLE);
+            qmi_message_tlv_write_guint8 (message, info->cid);
+            qmi_message_tlv_write_complete (message, init_offset, NULL);
+        } else
+#endif
+        {
+            message = qmi_message_new (QMI_SERVICE_CTL, 0, 0, QMI_MESSAGE_CTL_RELEASE_CID);
+            init_offset = qmi_message_tlv_write_init (message, QMI_MESSAGE_INPUT_TLV_RELEASE_INFO, NULL);
+            qmi_message_tlv_write_guint8 (message, (guint8)info->service);
+            qmi_message_tlv_write_guint8 (message, info->cid);
+            qmi_message_tlv_write_complete (message, init_offset, NULL);
+        }
+
+        device_track_ctl_request (device);
+        qmi_device_command_full (device,
+                                 message,
+                                 NULL,
+                                 5,
+                                 NULL,
+                                 (GAsyncReadyCallback)release_disowned_client_ready,
+                                 g_object_ref (self));
     }
 
-    if (!self->priv->disowned_qmi_client_info_array)
-        self->priv->disowned_qmi_client_info_array = g_steal_pointer (&client->qmi_client_info_array);
-    else {
-        self->priv->disowned_qmi_client_info_array = g_array_append_vals (self->priv->disowned_qmi_client_info_array,
-                                                                         client->qmi_client_info_array->data,
-                                                                         client->qmi_client_info_array->len);
-        g_clear_pointer (&client->qmi_client_info_array, g_array_unref);
-    }
+    g_array_set_size (client->qmi_client_info_array, 0);
 }
-
-static void device_close_if_unused (QmiProxy  *self,
-                                    QmiDevice *device);
 
 static void
 untrack_client (QmiProxy *self,
@@ -261,8 +315,8 @@ untrack_client (QmiProxy *self,
     /* Disconnect the client explicitly when untracking */
     client_disconnect (client);
 
-    /* Disown all QMI clients that were not explicitly released */
-    disown_not_released_clients (self, client);
+    /* Release all QMI clients that were not explicitly released */
+    release_not_released_clients (self, client, device);
 
     if (g_list_find (self->priv->clients, client)) {
         self->priv->clients = g_list_remove (self->priv->clients, client);
@@ -369,6 +423,30 @@ register_signal_handlers (Client *client)
 }
 
 static void
+proxy_device_removed_cb (QmiDevice *device,
+                         QmiProxy  *self)
+{
+    GList *l;
+
+    g_debug ("proxy: device '%s' removed/hung up, evicting from cache",
+             qmi_device_get_path_display (device));
+
+    for (l = self->priv->devices; l; l = g_list_next (l)) {
+        QmiDevice *device_in_list = QMI_DEVICE (l->data);
+
+        if (device_in_list &&
+            (device == device_in_list ||
+             g_str_equal (qmi_device_get_path (device), qmi_device_get_path (device_in_list)))) {
+            g_signal_handlers_disconnect_by_data (device_in_list, self);
+            qmi_device_close_async (device_in_list, 0, NULL, NULL, NULL);
+            g_object_unref (device_in_list);
+            self->priv->devices = g_list_remove (self->priv->devices, device_in_list);
+            return;
+        }
+    }
+}
+
+static void
 device_open_ready (QmiDevice *device,
                    GAsyncResult *res,
                    Client *client)
@@ -395,6 +473,10 @@ device_open_ready (QmiDevice *device,
     } else {
         /* Keep the newly added device in the proxy */
         self->priv->devices = g_list_append (self->priv->devices, g_object_ref (client->device));
+        g_signal_connect (client->device,
+                          "device-removed",
+                          G_CALLBACK (proxy_device_removed_cb),
+                          self);
     }
 
     register_signal_handlers (client);
@@ -828,6 +910,7 @@ device_close_if_unused (QmiProxy  *self,
             (device == device_in_list ||
              g_str_equal (qmi_device_get_path (device), qmi_device_get_path (device_in_list)))) {
             g_debug ("closing device '%s': no longer used", qmi_device_get_path_display (device));
+            g_signal_handlers_disconnect_by_data (device_in_list, self);
             qmi_device_close_async (device_in_list, 0, NULL, NULL, NULL);
             g_object_unref (device_in_list);
             self->priv->devices = g_list_remove (self->priv->devices, device_in_list);
@@ -939,8 +1022,8 @@ process_message (QmiProxy   *self,
     qmi_device_command_full (client->device,
                              message,
                              NULL,
-                             300,
-                             NULL,
+                             30,
+                             client->cancellable,
                              (GAsyncReadyCallback)device_command_ready,
                              request);
     return TRUE;
@@ -1071,6 +1154,8 @@ incoming_cb (GSocketService    *service,
     client->ref_count = 1;
     client->proxy = self;
     client->connection = g_object_ref (connection);
+    client->cancellable = g_cancellable_new ();
+    g_socket_set_timeout (g_socket_connection_get_socket (connection), 5);
     client->connection_readable_source = g_socket_create_source (g_socket_connection_get_socket (client->connection),
                                                                  G_IO_IN | G_IO_PRI | G_IO_ERR | G_IO_HUP,
                                                                  NULL);
@@ -1191,6 +1276,16 @@ static void
 dispose (GObject *object)
 {
     QmiProxyPrivate *priv = QMI_PROXY (object)->priv;
+    GList *l;
+
+    for (l = priv->devices; l; l = g_list_next (l)) {
+        QmiDevice *device = QMI_DEVICE (l->data);
+        if (device) {
+            g_signal_handlers_disconnect_by_data (device, object);
+            qmi_device_close_async (device, 0, NULL, NULL, NULL);
+        }
+    }
+    g_list_free_full (g_steal_pointer (&priv->devices), (GDestroyNotify) g_object_unref);
 
     g_clear_pointer (&priv->disowned_qmi_client_info_array, g_array_unref);
     g_list_free_full (g_steal_pointer (&priv->clients), (GDestroyNotify) client_unref);
