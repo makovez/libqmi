@@ -45,14 +45,18 @@ jobs:
 
     - name: Package Debian .deb
       run: |
-        mkdir -p dist/usr/libexec dist/DEBIAN
+        mkdir -p dist/usr/libexec dist/usr/lib/x86_64-linux-gnu dist/DEBIAN
         cp build/src/qmi-proxy/qmi-proxy dist/usr/libexec/qmi-proxy
         chmod 755 dist/usr/libexec/qmi-proxy
         strip dist/usr/libexec/qmi-proxy
+        cp build/src/libqmi-glib/libqmi-glib.so.5.12.0 dist/usr/lib/x86_64-linux-gnu/
+        chmod 755 dist/usr/lib/x86_64-linux-gnu/libqmi-glib.so.5.12.0
+        strip dist/usr/lib/x86_64-linux-gnu/libqmi-glib.so.5.12.0
+        ln -s libqmi-glib.so.5.12.0 dist/usr/lib/x86_64-linux-gnu/libqmi-glib.so.5
 
         cat << 'CTRL_EOF' > dist/DEBIAN/control
 Package: qmi-proxy-patched
-Version: 1.38.0-pxm2
+Version: 1.39.1-pxm2
 Section: net
 Priority: optional
 Architecture: amd64
@@ -61,12 +65,12 @@ Depends: libc6 (>= 2.34), libglib2.0-0t64 (>= 2.30.0)
 Provides: libqmi-proxy
 Conflicts: libqmi-proxy
 Replaces: libqmi-proxy
-Description: Patched qmi-proxy preventing 100% CPU spin loops during USB transfer errors
- Patched version of qmi-proxy from makovez/libqmi with built-in poll/read safety
- preventing GLib GUnixInputStream busy loops when modems experience USB -71 protocol errors.
+Description: Patched qmi-proxy preventing firmware CID leaks, zombie FDs, and socket write hangs
+ Patched version of qmi-proxy and libqmi-glib from makovez/libqmi with automatic CID release on disconnect,
+ device-removed signal handlers for zombie fd eviction, and socket write timeouts.
 CTRL_EOF
 
-        dpkg-deb --root-owner-group --build dist qmi-proxy-patched_1.38.0-pxm2_amd64.deb
+        dpkg-deb --root-owner-group --build dist qmi-proxy-patched_1.39.1-pxm2_amd64.deb
         ls -la *.deb
 
     - name: Upload Debian Package Artifact
